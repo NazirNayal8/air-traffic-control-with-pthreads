@@ -3,6 +3,7 @@
 #include <queue>
 #include <vector>
 #include <cmath>
+#include <deque>
 #include <chrono>
 #include <ctime>
 #include <random>
@@ -56,6 +57,13 @@ void _print(T t, V... v) {
 #define LEAVING 1
 #define EMERGENCY 2
 #define MAX_PLANES 1000000
+#define MAX_CHAR 10000
+#define LANDING_WAIT_THRESHOLD 5
+#define LEAVING_WAIT_THRESHOLD 5
+#define NORMAL_POLICY 0
+#define STARVATION_POLICY 1
+#define CROWDED_POLICY 2
+
 const int t = 1;
 
 #define time_point chrono::_V2::system_clock::time_point
@@ -89,7 +97,7 @@ bool DurationIsValid(){
   auto current_time = time_now();
   duration<double> Duration = current_time - start_time;
 
-  return Duration.count() < S;
+  return Duration.count() <= S;
 }
 
 struct Plane {
@@ -106,7 +114,7 @@ struct Plane {
     type = _type;
 
     assert(0 <= arrival_time);
-    assert(type == LANDING || type == LEAVING);
+    assert(type == LANDING || type == LEAVING || type == EMERGENCY);
   }
 
   void AppendRunwayTime(){
@@ -115,8 +123,9 @@ struct Plane {
   }
 };
 
-queue<Plane> LandingQueue;
-queue<Plane> LeavingQueue;
+deque<Plane> LandingQueue;
+deque<Plane> LeavingQueue;
+deque<Plane> EmergencyQueue;
 
 pthread_mutex_t LandingQueueMutex;
 pthread_mutex_t LeavingQueueMutex;
@@ -126,6 +135,7 @@ pthread_mutex_t IDMutex;
 vector<pthread_cond_t> Conditions(MAX_PLANES);
 vector<pthread_mutex_t> Locks(MAX_PLANES);
 
+string Logs = "";
 
 void InitMutex(){
   pthread_mutex_init(&LandingQueueMutex, NULL);
@@ -141,20 +151,31 @@ void InitLog(){
   char entry3[] = "Request Time";
   char entry4[] = "Runway Time";
   char entry5[] = "Turnaround Time";
-
-  printf("%10s %7s %15s %15s %15s\n", entry1, entry2, entry3, entry4, entry5);
-  puts("---------------------------------------------------------------------");
+  char out[MAX_CHAR];
+  sprintf(out, "%10s %7s %15s %15s %15s\n", entry1, entry2, entry3, entry4, entry5);
+  Logs += string(out);
+  sprintf(out, "---------------------------------------------------------------------\n");
+  Logs += string(out);
 }
 
 void Log(Plane plane){
 
   int ID = plane.ID;
-  char status = (plane.type == LANDING) ? 'L' : 'D' ;
+  char status ;
+  if(plane.type == LANDING)
+    status = 'L';
+  else if(plane.type == LEAVING)
+    status = 'D';
+  else
+    status = 'E';
+
   double arr_time = plane.arrival_time;
   double run_time = plane.runway_time;
   double trn_time = plane.turnaround_time;
+  char out[MAX_CHAR];
 
-  printf("%10d %7c %15f %15f %15f\n", ID, status, arr_time, run_time, trn_time);
+  sprintf(out, "%10d %7c %15lf %15lf %15lf\n", ID, status, arr_time, run_time, trn_time);
+  Logs += string(out);
 }
 
 
@@ -169,7 +190,8 @@ int pthread_sleep (int seconds) {
     return -1;
   }
   struct timeval tp;
-  // When to expire is an absolute time, so get the current time and add //it to our delay time
+  // When to expire is an absolute time, so get the current time and add
+  //it to our delay time
   gettimeofday(&tp, NULL);
   timetoexpire.tv_sec = tp.tv_sec + seconds;
   timetoexpire.tv_nsec = tp.tv_usec * 1000;
@@ -189,11 +211,11 @@ int LeavingID = -1;
 
 int GenerateID(int type){
 
-  assert(type == LANDING || type == LEAVING);
+  assert(type == LANDING || type == LEAVING || type == EMERGENCY);
   int ID;
 
   pthread_mutex_lock(&IDMutex);
-  ID = (type == LANDING) ? (LandingID += 2) : (LeavingID += 2);
+  ID = (type == LANDING || type == EMERGENCY) ? (LandingID += 2) : (LeavingID += 2);
   pthread_mutex_unlock(&IDMutex);
 
   pthread_mutex_init(&Locks[ID], NULL);
@@ -203,7 +225,7 @@ int GenerateID(int type){
 }
 
 
-bool ProcessLanding() {
+bool HandleLanding() {
 
   bool process = false;
   Plane plane = Plane();
@@ -211,14 +233,13 @@ bool ProcessLanding() {
   pthread_mutex_lock(&LandingQueueMutex);
   if(!LandingQueue.empty()){
     process = true;
-    plane = LandingQueue.front();
-    LandingQueue.pop();
+    plane = LandingQueue.back();
+    LandingQueue.pop_back();
   }
   pthread_mutex_unlock(&LandingQueueMutex);
 
   if(process){
     pthread_sleep(2 * t);
-
     pthread_mutex_lock(&Locks[plane.ID]);
     pthread_cond_signal(&Conditions[plane.ID]);
     pthread_mutex_unlock(&Locks[plane.ID]);
@@ -227,7 +248,7 @@ bool ProcessLanding() {
   return process;
 }
 
-bool ProcessLeaving() {
+bool HandleLeaving() {
 
   bool process = false;
   Plane plane = Plane();
@@ -235,14 +256,13 @@ bool ProcessLeaving() {
   pthread_mutex_lock(&LeavingQueueMutex);
   if(!LeavingQueue.empty()){
     process = true;
-    plane = LeavingQueue.front();
-    LeavingQueue.pop();
+    plane = LeavingQueue.back();
+    LeavingQueue.pop_back();
   }
   pthread_mutex_unlock(&LeavingQueueMutex);
 
   if(process){
     pthread_sleep(2 * t);
-
     pthread_mutex_lock(&Locks[plane.ID]);
     pthread_cond_signal(&Conditions[plane.ID]);
     pthread_mutex_unlock(&Locks[plane.ID]);
@@ -251,15 +271,93 @@ bool ProcessLeaving() {
   return process;
 }
 
+bool HandleEmergency() {
+  bool process = false;
+  Plane plane = Plane();
+
+  pthread_mutex_lock(&EmergencyQueueMutex);
+  if(!EmergencyQueue.empty()){
+    process = true;
+    plane = EmergencyQueue.back();
+    EmergencyQueue.pop_back();
+  }
+  pthread_mutex_unlock(&EmergencyQueueMutex);
+
+  if(process){
+    pthread_sleep(2 * t);
+    pthread_mutex_lock(&Locks[plane.ID]);
+    pthread_cond_signal(&Conditions[plane.ID]);
+    pthread_mutex_unlock(&Locks[plane.ID]);
+  }
+
+  return process;
+}
+
+int GetPolicy() {
+
+  int LandWait = 0;
+  int LeavWait = 0;
+
+  pthread_mutex_lock(&LandingQueueMutex);
+  LandWait = LandingQueue.size();
+  pthread_mutex_unlock(&LandingQueueMutex);
+
+  pthread_mutex_lock(&LandingQueueMutex);
+  LeavWait = LeavingQueue.size();
+  pthread_mutex_unlock(&LandingQueueMutex);
+
+  if(LEAVING_WAIT_THRESHOLD <= LeavWait && LEAVING_WAIT_THRESHOLD <= LandWait)
+    return CROWDED_POLICY;
+
+  if(LEAVING_WAIT_THRESHOLD <= LeavWait)
+    return STARVATION_POLICY;
+
+  return NORMAL_POLICY;
+}
+
+int crowded_state = 0;
+
+void ResetCrowded(){
+  crowded_state = 0;
+}
+
+void HandleCrowded() {
+    if(crowded_state % 3 == 2){
+      HandleLeaving();
+    }else{
+      HandleLanding();
+    }
+    crowded_state++;
+}
+
 void* ATC(void *ptr){
 
   while(DurationIsValid()) {
-    if(ProcessLanding()){
+
+    if(HandleEmergency()) {
+      continue;
+    }
+
+    int policy = GetPolicy();
+
+    if(policy == CROWDED_POLICY){
+      HandleCrowded();
+      continue;
+    } else {
+      ResetCrowded();
+    }
+
+    if(policy == STARVATION_POLICY){
+      HandleLeaving();
+      continue;
+    }
+
+    if(HandleLanding()){
       debug("Landing Happened");
       continue;
     }
 
-    if(ProcessLeaving()){
+    if(HandleLeaving()){
       debug("Leaving Happened");
       continue;
     }
@@ -268,18 +366,36 @@ void* ATC(void *ptr){
   pthread_exit(NULL);
 }
 
-void EnqueueLandingPlane(Plane &plane){
-
-  pthread_mutex_lock(&LandingQueueMutex);
-  LandingQueue.push(plane);
-  pthread_mutex_unlock(&LandingQueueMutex);
-}
-
 void EnqueueLeavingPlane(Plane &plane){
 
   pthread_mutex_lock(&LeavingQueueMutex);
-  LeavingQueue.push(plane);
+  LeavingQueue.push_front(plane);
   pthread_mutex_unlock(&LeavingQueueMutex);
+}
+
+void EnqueueLandingPlane(Plane &plane){
+
+  pthread_mutex_lock(&LandingQueueMutex);
+  LandingQueue.push_front(plane);
+  pthread_mutex_unlock(&LandingQueueMutex);
+}
+
+
+void EnqueueEmergencyPlane(Plane &plane){
+
+  pthread_mutex_lock(&EmergencyQueueMutex);
+  EmergencyQueue.push_front(plane);
+  pthread_mutex_unlock(&EmergencyQueueMutex);
+}
+
+void AwaitResponse(Plane &plane){
+
+  pthread_mutex_lock(&Locks[plane.ID]);
+  pthread_cond_wait(&Conditions[plane.ID], &Locks[plane.ID]);
+  pthread_mutex_unlock(&Locks[plane.ID]);
+
+  plane.AppendRunwayTime();
+  Log(plane);
 }
 
 void* LeavingRequest(void *ptr){
@@ -292,13 +408,7 @@ void* LeavingRequest(void *ptr){
 
     EnqueueLeavingPlane(plane);
 
-    pthread_mutex_lock(&Locks[plane.ID]);
-    pthread_cond_wait(&Conditions[plane.ID], &Locks[plane.ID]);
-    pthread_mutex_unlock(&Locks[plane.ID]);
-
-    plane.AppendRunwayTime();
-
-    Log(plane);
+    AwaitResponse(plane);
 
     pthread_mutex_destroy(&Locks[plane.ID]);
     pthread_cond_destroy(&Conditions[plane.ID]);
@@ -306,7 +416,7 @@ void* LeavingRequest(void *ptr){
     pthread_exit(NULL);
 }
 
-void* LandingRequest(void *ptr){
+void* LandingRequest(void *ptr) {
 
   double arrival_time = GetElapsedTime();
 
@@ -316,18 +426,99 @@ void* LandingRequest(void *ptr){
 
   EnqueueLandingPlane(plane);
 
-  pthread_mutex_lock(&Locks[plane.ID]);
-  pthread_cond_wait(&Conditions[plane.ID], &Locks[plane.ID]);
-  pthread_mutex_unlock(&Locks[plane.ID]);
-
-  plane.AppendRunwayTime();
-
-  Log(plane);
+  AwaitResponse(plane);
 
   pthread_mutex_destroy(&Locks[plane.ID]);
   pthread_cond_destroy(&Conditions[plane.ID]);
 
   pthread_exit(NULL);
+}
+
+void* EmergencyRequest(void *ptr) {
+
+  double arrival_time = GetElapsedTime();
+
+  int ID = GenerateID(EMERGENCY);
+
+  Plane plane = Plane(ID, arrival_time, EMERGENCY);
+
+  EnqueueEmergencyPlane(plane);
+
+  AwaitResponse(plane);
+
+  pthread_mutex_destroy(&Locks[plane.ID]);
+  pthread_cond_destroy(&Conditions[plane.ID]);
+
+  pthread_exit(NULL);
+}
+
+void* EmergencyFlights(void *ptr) {
+
+  pthread_sleep(40 * t);
+
+  while(DurationIsValid()){
+
+    pthread_t thread;
+    int dummy = 1;
+    int err = pthread_create(&thread, NULL, EmergencyRequest, (void*) dummy);
+    pthread_sleep(40 * t);
+  }
+
+  pthread_exit(NULL);
+}
+
+vector<int> GetLandingWait() {
+
+    vector<int> Wait;
+    pthread_mutex_lock(&LandingQueueMutex);
+    for(auto &plane : LandingQueue){
+      Wait.push_back(plane.ID);
+    }
+    pthread_mutex_unlock(&LandingQueueMutex);
+
+    return Wait;
+}
+
+vector<int> GetLeavingWait() {
+
+  vector<int> Wait;
+  pthread_mutex_lock(&LeavingQueueMutex);
+  for(auto &plane : LeavingQueue){
+    Wait.push_back(plane.ID);
+  }
+  pthread_mutex_unlock(&LeavingQueueMutex);
+
+  return Wait;
+}
+
+
+void* WaitingSnapshot(void *ptr){
+
+    while(DurationIsValid()){
+
+      vector<int> LandingWait = GetLandingWait();
+      vector<int> LeavingWait = GetLeavingWait();
+
+      printf("Waiting Snapshot at time %lf:\n", GetElapsedTime());
+
+      printf("\t Planes Waiting to Land: \n");
+      for(auto &plane : LandingWait) printf("\t\t- ID : %d\n", plane);
+
+      if(LandingWait.empty()){
+        printf("\t\t- NONE\n");
+      }
+
+      printf("\t Planes Waiting to Leave: \n");
+      for(auto &plane : LeavingWait) printf("\t\t- ID : %d\n", plane);
+
+      if(LeavingWait.empty()){
+        printf("\t\t- NONE\n");
+      }
+
+      pthread_sleep(t);
+    }
+
+    pthread_exit(NULL);
 }
 
 
@@ -350,16 +541,17 @@ int main(int argc, char *argv[]) {
 
   start_time = time_now();
 
-  pthread_t atc, plane[MAX_PLANES], idx = 0;
-
-  int dummy = 1, err;
+  pthread_t atc, plane[MAX_PLANES], snapshot, urgent;
+  int dummy = 1, err, idx = 0;
 
   err = pthread_create(&atc, NULL, ATC, (void *) dummy);
-
+  err = pthread_create(&urgent, NULL, EmergencyFlights, (void*) dummy);
   // use chrono::system_clock::now().time_since_epoch().count(); for random seed
   const unsigned int seed = 1;
   mt19937_64 rng(seed);
   uniform_real_distribution<double> unif(0.0, 1.0);
+
+  bool snapshot_started = false;
 
   while(DurationIsValid()){
 
@@ -370,6 +562,11 @@ int main(int argc, char *argv[]) {
     else
       err = pthread_create(&plane[idx++], NULL, LeavingRequest, (void*) dummy);
 
+    if(!snapshot_started && GetElapsedTime() > N){
+      snapshot_started = true;
+      err = pthread_create(&snapshot, NULL, WaitingSnapshot, (void*) dummy);
+    }
+
     pthread_sleep(t);
   }
 
@@ -377,7 +574,8 @@ int main(int argc, char *argv[]) {
 
   pthread_join(atc, &status);
 
-  puts("Finished");
+  cout << Logs << endl;
+
   exit(0);
   return 0;
 }
