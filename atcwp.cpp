@@ -6,6 +6,7 @@
 #include <deque>
 #include <chrono>
 #include <ctime>
+#include <fstream>
 #include <random>
 #include <cassert>
 #include <stdio.h>
@@ -52,7 +53,8 @@ void _print(T t, V... v) {
   if (sizeof...(v))
     cerr << ", "; _print(v...);
 }
-#ifndef ONLINE_JUDGE
+#define ONLINE_MODE
+#ifndef ONLINE_MODE
 #define debug(x...) cerr << "[" << #x << "] = ["; _print(x)
 #else
 #define debug(x...)
@@ -77,9 +79,9 @@ void _print(T t, V... v) {
 const int t = 1;
 
 time_point start_time; // stores start time of simulation
-int S; // stores duration of simulation in seconds
-int N; // stores number of seconds after which to start logging waiting planes
-double P; // stores probability of Landing Plane arrival
+int S = 10; // stores duration of simulation in seconds
+int N = 1; // stores number of seconds after which to start logging waiting planes
+double P = 0.5; // stores probability of Landing Plane arrival
 
 /*
   Returns current time as a string
@@ -689,21 +691,22 @@ void* WaitingSnapshot(void *ptr) {
   pthread_exit(NULL);
 }
 
-
 int main(int argc, char *argv[]) {
 
   // parse commands line arguments
-  S = atoi(argv[2]);
-  P = atof(argv[4]);
-  N = atoi(argv[6]);
+  for(int i = 1 ; i < argc ; i += 2){
+    string flag = string(argv[i]);
 
-  string _S = string(argv[1]);
-  string _P = string(argv[3]);
-  string _N = string(argv[5]);
+    assert(flag == "-s" || flag == "-p" || flag == "-n");
 
-  assert(_S == "-s");
-  assert(_P == "-p");
-  assert(_N == "-n");
+    if (flag == "-s") {
+      S = atoi(argv[i + 1]);
+    } else if (flag == "-p") {
+      P = atof(argv[i + 1]);
+    } else if (flag == "-n") {
+      N = atoi(argv[i + 1]);
+    }
+  }
 
   InitMutex();
   InitLog();
@@ -750,7 +753,9 @@ int main(int argc, char *argv[]) {
 
   pthread_join(atc, &status);
 
-  cout << Logs << endl;
+  std::ofstream log_file("planes.log");
+  log_file << Logs;
+  log_file.close();
 
   exit(0);
   return 0;
